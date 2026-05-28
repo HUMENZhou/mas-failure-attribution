@@ -9,7 +9,7 @@ from typing import Type
 from adapter.base_adapter import BaseAdapter
 from utils.common import read_json_file, write_json_file
 from utils.fault_library import fault_candidates_for_prompt
-from utils.prompts import DIAGNOSE_ANALYSIS_PROMPT
+from utils.prompts import get_diagnose_analysis_prompt
 from utils.logging import logger
 
 async def diagnose_analysis(
@@ -21,6 +21,7 @@ async def diagnose_analysis(
     skipping_exists: bool = True,
     message: str = None,
     semaphore: Semaphore = None,
+    diagnose_mode: str = "default",
 ):
     """
     Generate and persist one diagnosis suggestion for a task round.
@@ -32,6 +33,7 @@ async def diagnose_analysis(
         backend: Backend adapter used to execute prompt-driven generation.
         injection_history: Existing attack/diagnose history from prior rounds.
         skipping_exists: Whether to skip when target output already exists.
+        diagnose_mode: Prompt mode — ``default`` (direct) or ``critic`` (tool-interactive CRITIC).
 
     Returns:
         ``True`` when a valid diagnosis analysis is generated, otherwise ``False``.
@@ -44,7 +46,8 @@ async def diagnose_analysis(
         else:
             min_step_id = 0
         result_path = workspace / f'{task_id}_diagnose_analysis.json'
-        idea = DIAGNOSE_ANALYSIS_PROMPT.format(
+        prompt_template = get_diagnose_analysis_prompt(diagnose_mode)
+        idea = prompt_template.format(
             task_id=task["question_ID"],
             question=task["question"],
             ground_truth=task["ground_truth"],

@@ -20,6 +20,7 @@ from typing import Type
 
 # Third-party library imports.
 import datasets
+from pipeline.multimodal_task.multimodal_eval import load_eval_results_new, run_eval_tasks_new
 from sandbox_fusion import set_dataset_endpoint, set_sandbox_endpoint
 import asyncio
 from tqdm.asyncio import tqdm
@@ -32,8 +33,8 @@ from monitor.base_monitor import BaseMonitor
 # Project-local imports: pipeline stages.
 from pipeline.coding.attack import attack_analysis, get_attack_analysis
 from pipeline.coding.diagnose import diagnose_analysis, get_diagnose_analysis
-from pipeline.math.eval import load_eval_results, run_eval_tasks
-from pipeline.math.run import run_coding_task
+from pipeline.coding.eval import load_eval_results, run_eval_tasks
+from pipeline.coding.run import run_coding_task
 
 # Project-local imports: utilities.
 from utils.common import match_info, read_json_file, save_final_result, write_json_file
@@ -41,6 +42,7 @@ from utils.logging import handler
 from utils.logging import logger
 
 from utils.prompts import REPLAY_PROMPT
+from utils.task_record import normalize_parquet_task_row
 
 def _load_backend(name: str) -> Type[BaseAdapter]:
     """Load a backend adapter class by backend name.
@@ -72,11 +74,10 @@ async def main(args):
     )
     logger.info(f"Loaded {len(dataset)} tasks from {args.dataset}")
     tasks = dataset.to_list()
-    for i, task in enumerate(tasks):
-        task['data_source'] = 'math'
-        task['task_id'] = f'Math_{i+1}'
-        task['question'] = task['problem']
-        task['reference_solution'] = task['solution']
+    tasks = [
+        normalize_parquet_task_row(t, dataset_path=args.dataset)
+        for t in tasks
+    ]
         
     if args.max_samples is not None:
         tasks = tasks[: args.max_samples]
@@ -91,6 +92,12 @@ async def main(args):
     skip_existing = args.skip_existing
     max_rounds = args.max_rounds
     rollout_only = args.rollout
+    run_attack = args.run_mode in ("all", "attack")
+    run_diagnose = args.run_mode in ("all", "diagnose")
+    logger.info(
+        f"run_mode={args.run_mode}: attack={'on' if run_attack else 'off'}, "
+        f"diagnose={'on' if run_diagnose else 'off'}"
+    )
 
     use_concurrency = args.concurrent is not None and args.concurrent > 1
     concurrency = args.concurrent if use_concurrency else 1
@@ -123,13 +130,16 @@ async def main(args):
             monitor=monitor,
             semaphore=semaphore
         ))
-    
-    await tqdm.gather(*coros)
 
-    # Start to eval round 0
     eval_path = output_root / data_source / "round_0"
-    await run_eval_tasks(eval_path, data_source=data_source, semaphore=semaphore, skip_existing=skip_existing)
-    eval_results, msg_results = load_eval_results(eval_path, data_source)
+    await tqdm.gather(*coros)
+    if args.backend == "MagenticOne":
+        run_eval_tasks_new(eval_path, data_source=data_source, skip_existing=skip_existing)
+        eval_results = load_eval_results_new(eval_path, data_source)
+    else:
+    # Start to eval round 0
+        await run_eval_tasks(eval_path, data_source=data_source, semaphore=semaphore, skip_existing=skip_existing)
+        eval_results, msg_results = load_eval_results(eval_path, data_source)
     
     if rollout_only:
         return
@@ -168,6 +178,17 @@ async def main(args):
                             logger.info(f'Log for task {task_id} exists, skipping this round...')
                             return
                     if eval_results[task_id]:
+                        if not run_attack:
+                            logger.info(
+                                f'run_mode={args.run_mode}: skip attack for success task {task_id}'
+                            )
+                            shutil.copytree(
+                                last_round_output,
+                                output,
+                                dirs_exist_ok=True,
+                            )
+                            return
+
                         logger.info(f'Last round processed as success for {task_id}, start the attack process...')
                         
                         workspace = workspace_root / data_source / f"round_{current}" / f'{task_id}_attack_analysis'
@@ -200,6 +221,17 @@ async def main(args):
 
                         replay_info = get_attack_analysis(output)
                     else:
+                        if not run_diagnose:
+                            logger.info(
+                                f'run_mode={args.run_mode}: skip diagnose for failed task {task_id}'
+                            )
+                            shutil.copytree(
+                                last_round_output,
+                                output,
+                                dirs_exist_ok=True,
+                            )
+                            return
+
                         logger.info(f'Last round processed as failure for {task_id}, start the diagnosis process...')
                         
                         workspace = workspace_root / data_source / f"round_{current}" / f'{task_id}_diagnose_analysis'
@@ -219,7 +251,8 @@ async def main(args):
                             skipping_exists=skip_existing,
                             injection_history=previous_injections,
                             message=msg_results[task_id],
-                            semaphore=semaphore
+                            semaphore=semaphore,
+                            diagnose_mode=args.diagnose_mode,
                         )
                         if not is_success:
                             logger.info(f'Diagnose Analysis Failed, skipping this round...')
@@ -257,8 +290,12 @@ async def main(args):
         # save last round's eval results
         last_eval_results = eval_results
         eval_path = output_root / data_source / f"round_{current}"
-        await run_eval_tasks(eval_path, data_source=data_source, semaphore=semaphore, skip_existing=skip_existing)
-        eval_results, msg_results = load_eval_results(eval_path, data_source)
+        if args.backend == "MagenticOne":
+            run_eval_tasks_new(eval_path, data_source=data_source, skip_existing=skip_existing)
+            eval_results = load_eval_results_new(eval_path, data_source)
+        else:
+            await run_eval_tasks(eval_path, data_source=data_source, semaphore=semaphore, skip_existing=skip_existing)
+            eval_results, msg_results = load_eval_results(eval_path, data_source)
         
         for task_id in eval_results:
             if task_id not in last_eval_results:
@@ -266,6 +303,11 @@ async def main(args):
             if eval_results[task_id] ^ last_eval_results[task_id]:
                 output = output_root / data_source / f"round_{current}" / task_id
                 if last_eval_results[task_id]:
+                    if not run_attack:
+                        logger.info(
+                            f'run_mode={args.run_mode}: skip attack finalization for {task_id}'
+                        )
+                        continue
                     logger.info(f'[Round {current}] Attack result eval changed to failure, diagnosing...')
                     last_round_output = output_root / data_source / f"round_{current}" / task_id
                     if not last_round_output.exists():
@@ -294,6 +336,11 @@ async def main(args):
                            logger.info(f'Direct diagnose success, regarding as easy injection...')
                            continue """
                 else:
+                    if not run_diagnose:
+                        logger.info(
+                            f'run_mode={args.run_mode}: skip diagnose finalization for {task_id}'
+                        )
+                        continue
                     last_round_output = output_root / data_source / f"round_{current-1}" / task_id
                     if not last_round_output.exists():
                         raise FileNotFoundError(f'last round output not exists for {task_id}')
@@ -335,13 +382,22 @@ if __name__ == "__main__":
     parser.add_argument("--concurrent", type=int, default=None, help="Enable concurrent processing")
     parser.add_argument("--skip_existing", "-s", action="store_true")
     parser.add_argument("--rollout", action="store_true")
-    # TODO: add mode to control the run mode
     parser.add_argument(
-        "--mode",
+        "--run-mode",
         type=str,
-        choices=["full", "attack", "diagnose"],
-        default="full",
-        help="Run mode",
+        choices=["all", "attack", "diagnose"],
+        default="all",
+        help=(
+            "Pipeline branch control: all (success->attack, fail->diagnose), "
+            "attack (only attack on success), diagnose (only diagnose on failure)"
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-mode",
+        type=str,
+        choices=["default", "critic"],
+        default="default",
+        help="Diagnose analysis prompt mode: default (direct) or critic (CRITIC tool-interactive)",
     )
 
     args = parser.parse_args()

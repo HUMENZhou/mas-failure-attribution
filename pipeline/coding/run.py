@@ -52,10 +52,12 @@ async def run_coding_task(
     async with semaphore:
         data_source = task["data_source"]
         task_id = task["task_id"]
+        signature = task["reference_solution"].split("\n")[0]
         idea = (
             task["question"]
             + f"I wish you finish the task with a multi-agent cooperation"
             + f"The file name of your solution MUST be 'solution.py' and MUST be located at root directory"
+            + f'The signature of function is {signature}'
         )
         log = output / 'log.json'
         if log.exists():

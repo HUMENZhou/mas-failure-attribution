@@ -24,6 +24,7 @@ from metagpt.roles import (
     Engineer2,
     ProductManager,
     TeamLeader,
+    Searcher,
 )
 from metagpt.logs import set_human_input_func
 from metagpt.environment.mgx.mgx_env import MGXEnv
@@ -90,19 +91,23 @@ class MetaGPTAdapter(BaseAdapter):
 
         # Initialize the Team
         self.company = Team(context=ctx, env=SerialMGXEnv())
+        leader = TeamLeader()
+        self.llm = leader.llm
         members = [
-            TeamLeader(),
+            leader,
             ProductManager(),
             Architect(),
             Engineer2(),
-            DataAnalyst()
+            DataAnalyst(),
+            #Searcher(),
         ]
         self.company.hire(members)
         
         # insert monitor into MAS
         for member in members:
-            member.editor.working_dir = workspace
-            member.editor.enable_auto_lint = False
+            if hasattr(member, "editor"):            
+                member.editor.working_dir = workspace
+                member.editor.enable_auto_lint = False
             patch_with_middlewares(
                 member,
                 "_observe",
@@ -163,5 +168,9 @@ class MetaGPTAdapter(BaseAdapter):
             "Architect": ARCHITECT_INSTRUCTION,
             "Product Manager": PRODUCT_MANAGER_INSTRUCTION,
             "DataAnalyst": DATA_ANALYST_INSTRUCTION,
+            "Searcher": '',
         }
+
+    async def llm_aask(self, msg:str):
+        return await self.llm.aask(msg)
     
