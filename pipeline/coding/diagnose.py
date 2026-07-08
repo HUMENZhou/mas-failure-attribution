@@ -6,7 +6,11 @@ import shutil
 from typing import Type
 
 from adapter.base_adapter import BaseAdapter
-from utils.common import read_json_file, write_json_file
+from utils.common import (
+    read_json_file,
+    validate_attribution_info,
+    write_json_file,
+)
 from utils.fault_library import fault_candidates_for_prompt
 from utils.prompts import DIAGNOSE_ANALYSIS_PROMPT
 from utils.logging import logger
@@ -39,6 +43,11 @@ def diagnose_analysis(
         min_step_id = injection_history[-1]['step_id']
     else:
         min_step_id = 0
+    allowed_step_ids = [
+        item.get('step')
+        for item in task.get('history', [])
+        if isinstance(item, dict) and isinstance(item.get('step'), int)
+    ]
     idea = DIAGNOSE_ANALYSIS_PROMPT.format(
         task_id=task["question_ID"],
         question=task["question"],
@@ -49,12 +58,18 @@ def diagnose_analysis(
         history_str=task['history'],
         injection_history=injection_history,
         min_step_id=min_step_id,
+        allowed_step_ids=allowed_step_ids,
     )
     log = output / 'diagnose_analysis.json'
     if log.exists():
         if skipping_exists:
             logger.info(f'Log for task {task_id} exists, skipping this round...')
-            return
+            try:
+                validate_attribution_info(task, read_json_file(log))
+            except ValueError as e:
+                logger.error(f'Existing diagnose analysis invalid for task {task_id}: {e}')
+                return False
+            return True
         else:
             logger.info(f'Log for task {task_id} exists, overriding...')
             shutil.rmtree(workspace, ignore_errors=True)
@@ -84,9 +99,16 @@ def diagnose_analysis(
         logger.error(f'diagnose analysis result not found for task {task_id}')
         return False
 
+    diagnose_history = injection_history + [diagnose_suggestion]
+    try:
+        validate_attribution_info(task, diagnose_history)
+    except ValueError as e:
+        logger.error(f'Diagnose analysis invalid for task {task_id}: {e}')
+        return False
+
     write_json_file(
         log,
-        injection_history + [diagnose_suggestion]
+        diagnose_history
     )
     return True
 

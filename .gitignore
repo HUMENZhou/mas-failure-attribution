@@ -210,3 +210,14 @@ __marimo__/
 workspace/*
 output/*
 *.log*
+.codex/
+.codex
+.venv*/
+.venv-win/
+.venv-gaia-lite/
+tmp/
+/owl/
+owl/owl/.env*
+!owl/owl/.env_template
+/dataset/*
+!/dataset/README_ZH_EN.md

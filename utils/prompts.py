@@ -21,10 +21,13 @@ Topology Information:
 Original Task Execution History:
 {history_str}
 
+Allowed step_id values for this task:
+{allowed_step_ids}
+
 Your attack injection should be in the following JSON format. When writing to files, you should transform it to a **string** first:
 
 {{
-    "step_id": <step_number, should greater than {min_step_id} and not equal to any steps in injection history>,
+    "step_id": <one integer from Allowed step_id values, should be greater than {min_step_id} and not equal to any steps in injection history>,
     "fault_code": "<fault code from fault candidate pool>",
     "attacked_content": "<specific, concrete modification to that step's `content, guidance only, NOT the complete solution>",
     "mistake_reason": "<the brief description for mistake reason>",
@@ -33,7 +36,7 @@ Your attack injection should be in the following JSON format. When writing to fi
 
 Important Guidelines:
 1. fault_code must be exactly one code from the fault candidate pool above.
-2. step_id must exist in the Original Task Execution History and should be > {min_step_id}.
+2. step_id MUST be one of Allowed step_id values and should be > {min_step_id}. Do not invent, infer, or use a step_id outside that list.
 3. If multiple injection points are possible, prefer an earlier step with lower step_id.
 4. attacked_content must be a concrete, implementable modification that is strong enough to convert a successful trajectory into failure.
 5. related_error: array of step_id integers from past injection history. Use [] if no direct relation.
@@ -66,9 +69,12 @@ Topology Information:
 Original Task Execution History:
 {history_str}
 
+Allowed step_id values for this task:
+{allowed_step_ids}
+
 Your diagnosis should be in the following JSON format, when writing to files, you should transform it to a **string** first:
 {{
-    "step_id": <step_number, should greater than {min_step_id} and not equal to any steps in injection history>,
+    "step_id": <one integer from Allowed step_id values, should be greater than {min_step_id} and not equal to any steps in injection history>,
     "fault_code": "<fault code from fault candidate pool>",
     "suggested_fix": "<specific, concrete modification to that step's `content, guidance only, NOT the complete solution>",
     "mistake_reason": "<the brief description for mistake reason>",
@@ -77,7 +83,7 @@ Your diagnosis should be in the following JSON format, when writing to files, yo
 
 Important Guidelines:
 1. suspected_fault_codes should list exactly one code from the fault candidate pool above.
-2. step_id must exist in the Original Task Execution History and should be > {min_step_id}.
+2. step_id MUST be one of Allowed step_id values and should be > {min_step_id}. Do not invent, infer, or use a step_id outside that list.
 3. DO NOT provide the complete solution in suggested_fix.
 4. CRITICAL: Before submitting, verify steps exist in the history and agents match.
 5. If multiple point contains potential error, an earlier step with lower step_id is preferred. 
