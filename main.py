@@ -69,6 +69,9 @@ async def main(args):
         args: Parsed CLI arguments used to configure dataset, backend,
             workspace/output directories, and round execution controls.
     """
+
+    # step0: load dataset
+    ## TODO: 非.parquet的数据集需要处理
     dataset = datasets.load_dataset(
         "parquet", data_files={"train": args.dataset}, split="train"
     )
@@ -108,7 +111,8 @@ async def main(args):
     if not output_root.is_absolute():
         output_root = output_root.absolute()
 
-    # ROUND 0: run without injecting / diagnosing
+    # step1: run dataset tasks in multi-agent system, get running trajectory and eval results
+    # TODO：重构代码，这段主要是为了获取多智能体系统运行轨迹，main函数太长了
     coros = []
     semaphore = Semaphore(concurrency)
     for task in tasks:
@@ -121,6 +125,7 @@ async def main(args):
         logger.info('No recovery info, initializing new monitor...')
         recovery_path = output / 'recovery'
         monitor = BaseMonitor(recovery_path, workspace, backend)
+        # TODO: 这里需要根据不同的数据集选择不同的run_coding_task函数
         coros.append(run_coding_task(
             task,
             workspace,
@@ -133,7 +138,10 @@ async def main(args):
 
     eval_path = output_root / data_source / "round_0"
     await tqdm.gather(*coros)
+
+    # TODO：这里看如何根据数据集 选择对应的结果评估函数
     if args.backend == "MagenticOne":
+        # TODO：更改函数名称，run_eval_tasks_new
         run_eval_tasks_new(eval_path, data_source=data_source, skip_existing=skip_existing)
         eval_results = load_eval_results_new(eval_path, data_source)
     else:
@@ -143,11 +151,16 @@ async def main(args):
     
     if rollout_only:
         return
+
+
+    
+    # step2 multi-point injection and playback verification TODO：重构代码，现在太长了，抽象出单独的函数
     # ROUND i >= 1: divide eval results of round 0 into success / fail
     # sucess -> attack pipeline
     # fail -> diagnose pipeline
     # current implementation is for testing replay function
     completed_tasks = []
+
     for current in range(1, max_rounds + 1):
         length = len(tasks)
         batch_size = concurrency * 100
@@ -177,16 +190,14 @@ async def main(args):
                         if skip_existing:
                             logger.info(f'Log for task {task_id} exists, skipping this round...')
                             return
+                    
+                    # step 2 branch 1: sucess -> attack pipeline
                     if eval_results[task_id]:
                         if not run_attack:
                             logger.info(
                                 f'run_mode={args.run_mode}: skip attack for success task {task_id}'
                             )
-                            shutil.copytree(
-                                last_round_output,
-                                output,
-                                dirs_exist_ok=True,
-                            )
+                            shutil.copytree(last_round_output, output, dirs_exist_ok=True,)
                             return
 
                         logger.info(f'Last round processed as success for {task_id}, start the attack process...')
@@ -220,6 +231,8 @@ async def main(args):
                             return
 
                         replay_info = get_attack_analysis(output)
+
+                    # step 2 branch 2: fail -> diagnose pipeline
                     else:
                         if not run_diagnose:
                             logger.info(
@@ -300,9 +313,10 @@ async def main(args):
         for task_id in eval_results:
             if task_id not in last_eval_results:
                 continue
+            # step 2 branch 3: behavior flip -> final attribution
             if eval_results[task_id] ^ last_eval_results[task_id]:
                 output = output_root / data_source / f"round_{current}" / task_id
-                if last_eval_results[task_id]:
+                if last_eval_results[task_id]: # from success to fail, 
                     if not run_attack:
                         logger.info(
                             f'run_mode={args.run_mode}: skip attack finalization for {task_id}'
@@ -335,7 +349,7 @@ async def main(args):
                         if match_info(final_info, diagnose_info):
                            logger.info(f'Direct diagnose success, regarding as easy injection...')
                            continue """
-                else:
+                else:                               # from fail to success
                     if not run_diagnose:
                         logger.info(
                             f'run_mode={args.run_mode}: skip diagnose finalization for {task_id}'
@@ -361,12 +375,14 @@ if __name__ == "__main__":
     set_sandbox_endpoint("http://localhost:8080/")
     set_dataset_endpoint("http://localhost:8080/online_judge/")
     parser = argparse.ArgumentParser(description="Universal attack and diagnosis framework")
+    # 设置数据集
     parser.add_argument(
         "--dataset",
         type=str,
         required=True,
         help="Dataset path",
     )
+    # 设置多智能体系统
     parser.add_argument(
         "--backend",
         type=str,
