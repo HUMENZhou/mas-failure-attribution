@@ -71,12 +71,6 @@ class BaseMonitor(BaseModel):
             )
             return
         
-        # Record normal step
-        #recovery_step = self._recovery / f'step_{self.step}'
-        #recovery_step.mkdir(parents=True, exist_ok=True)
-        #self._backend.save_current_state(recovery_step)
-        #self.serialize(recovery_step)
-        #shutil.copytree(self._workspace, recovery_step / 'workspace')
         self.history.append(
             History(
                 step=self.step,

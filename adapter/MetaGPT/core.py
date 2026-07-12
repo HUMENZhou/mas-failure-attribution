@@ -3,14 +3,10 @@
 import asyncio
 from pathlib import Path
 
-from adapter.MetaGPT.middlewares.engineer import EngineerMiddleware
 from adapter.MetaGPT.middlewares.observe import ObserveMiddleware
-from adapter.MetaGPT.middlewares.team_leader import TeamLeaderMiddleware
-from adapter.MetaGPT.middlewares.terminal import TerminalMiddleware
 from adapter.MetaGPT.middlewares.think import ThinkMiddleware
-from adapter.MetaGPT.utils import get_name
 from adapter.middleware import patch_with_middlewares
-from monitor.base_monitor import BaseMonitor, RoleType
+from monitor.base_monitor import BaseMonitor
 from utils.prompts import REPLAY_PROMPT
 
 from ..base_adapter import BaseAdapter
@@ -21,13 +17,14 @@ from metagpt.prompts.product_manager import EXTRA_INSTRUCTION as PRODUCT_MANAGER
 from metagpt.prompts.di.data_analyst import EXTRA_INSTRUCTION as DATA_ANALYST_INSTRUCTION
 from metagpt.config2 import config
 from metagpt.context import Context
-from metagpt.team import Message, Team
+from metagpt.team import Team
 from metagpt.roles import (
     Architect,
     DataAnalyst,
     Engineer2,
     ProductManager,
     TeamLeader,
+    Searcher,
 )
 from metagpt.logs import set_human_input_func
 from metagpt.environment.mgx.mgx_env import MGXEnv
@@ -92,76 +89,41 @@ class MetaGPTAdapter(BaseAdapter):
         config.update_via_cli(project_path, project_name, inc, reqa_file, max_auto_summarize_code)
         ctx = Context(config=config)
 
-        # resume MetaGPT MAS
-        if recover_path:
-            if not recover_path.exists():
-                raise FileNotFoundError(f"{recover_path} not exists")
-            self.company = Team.deserialize(stg_path=recover_path, context=ctx)
-            members = [role for role in self.company.env.get_roles().values()]
-
-            # awake current working agent 
-            if len(monitor.history) > 0:
-                involved_role_names = [get_name(step.name) for step in monitor.history]
-                involved_roles = [self.company.env.get_role(name) for name in involved_role_names]
-                for role in involved_roles:
-                    role.put_message(Message(
-                        content=f'Continue to process: {idea}', 
-                        send_to={role.name}
-                    ))
-        else:
-            # Initialize the Team
-            self.company = Team(context=ctx, env=SerialMGXEnv())
-            members = [
-                TeamLeader(),
-                ProductManager(),
-                Architect(),
-                Engineer2(),
-                DataAnalyst()
-            ]
-            self.company.hire(members)
+        # Initialize the Team
+        self.company = Team(context=ctx, env=SerialMGXEnv())
+        leader = TeamLeader()
+        self.llm = leader.llm
+        members = [
+            leader,
+            ProductManager(),
+            Architect(),
+            Engineer2(),
+            DataAnalyst(),
+            #Searcher(),
+        ]
+        self.company.hire(members)
         
         # insert monitor into MAS
         for member in members:
-            member.editor.working_dir = workspace
-            member.editor.enable_auto_lint = False
+            if hasattr(member, "editor"):            
+                member.editor.working_dir = workspace
+                member.editor.enable_auto_lint = False
+            patch_with_middlewares(
+                member,
+                "_observe",
+                [ObserveMiddleware(monitor)]
+            )
+
             if hasattr(member, 'llm'):
                 patch_with_middlewares(
                     member.llm,
                     "aask",
                     [ThinkMiddleware(monitor, member.profile)]
                 )
-            patch_with_middlewares(
-                member,
-                "_observe",
-                [ObserveMiddleware(monitor)]
-            )
             
             if hasattr(member, 'terminal'):
                 member.terminal.work_dir = workspace
-                '''patch_with_middlewares(
-                    member.terminal,
-                    "_read_and_process_output",
-                    [TerminalMiddleware(monitor)]
-                )
-            if hasattr(member, "write_new_code"):
-                patch_with_middlewares(
-                    member,
-                    "write_new_code",
-                    [EngineerMiddleware(monitor)]
-                )
-            if hasattr(member, "write_and_exec_code"):
-                patch_with_middlewares(
-                    member,
-                    "write_and_exec_code",
-                    [EngineerMiddleware(monitor)]
-                )
-            if hasattr(member, "publish_team_message"):
-                patch_with_middlewares(
-                    member,
-                    "publish_team_message",
-                    [TeamLeaderMiddleware(monitor)]
-                )
-            '''
+
         self.company.invest(investment)
         coro = self.company.run(n_round=n_round, idea=idea)
         if use_async:
@@ -177,7 +139,7 @@ class MetaGPTAdapter(BaseAdapter):
             asyncio.run(_safe_close_ctx_llm())
             return ctx.kwargs.get("project_path")
     
-    def run_backend(
+    async def run_backend(
         self,
         idea: str,
         workspace: Path,
@@ -186,18 +148,17 @@ class MetaGPTAdapter(BaseAdapter):
         enable_lint: bool = True,
     ):
         """Execute backend task using adapter defaults for round count and setup."""
-        return self.generate_repo(
+        return await self.generate_repo(
             idea=idea,
             n_round=20,
             recover_path=recovery,
             workspace=workspace,
             monitor=monitor,
             enable_lint=enable_lint,
+            use_async=True
         )
     
-    def save_current_state(self, path: Path):
-        """Serialize current MetaGPT team state to recovery directory."""
-        self.company.serialize(path)
+
 
     def get_prompt_map(self):
         """Expose role system prompts for downstream logging and analysis."""
@@ -207,5 +168,9 @@ class MetaGPTAdapter(BaseAdapter):
             "Architect": ARCHITECT_INSTRUCTION,
             "Product Manager": PRODUCT_MANAGER_INSTRUCTION,
             "DataAnalyst": DATA_ANALYST_INSTRUCTION,
+            "Searcher": '',
         }
+
+    async def llm_aask(self, msg:str):
+        return await self.llm.aask(msg)
     

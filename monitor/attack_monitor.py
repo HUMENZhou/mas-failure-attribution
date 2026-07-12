@@ -69,7 +69,7 @@ class AttackMonitor(BaseMonitor):
         return default_value
 
     def get_current_reply(self) -> str:
-        return self._last_round_log['history'][self.step-1]['content']
+        return self._last_round_log['history'][self.step-1]['content'].replace('/mnt/c/Users/余凯越/mas-failure-attribution', '/mnt/c/Users/余凯越/mas-failure-attribution')
 
     def should_inject(self):
         """Return True when current step matches configured injection step."""

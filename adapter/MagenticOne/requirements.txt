@@ -1,0 +1,20 @@
+# AutoGen AgentChat 核心框架
+autogen-agentchat>=0.4.0
+
+# AutoGen 扩展包 - MagenticOne 和 OpenAI 支持
+autogen-ext[magentic-one,openai]>=0.4.0
+
+# OpenAI SDK (用于 API 调用)
+openai>=1.0.0
+
+# HTTP 客户端 (OpenAI SDK 依赖)
+httpx>=0.27.0
+
+# Playwright 浏览器自动化 (WebSurfer 需要)
+playwright>=1.40.0
+
+# Pydantic (数据验证)
+pydantic>=2.0.0
+
+# Python 标准库 (无需安装，但列出以供参考)
+# asyncio, json, os, shutil, sys, time, datetime, pathlib, typing

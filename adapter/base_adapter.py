@@ -9,7 +9,7 @@ class BaseAdapter(ABC):
     """Define the minimal interface required by the pipeline runtime."""
 
     @abstractmethod
-    def run_backend(
+    async def run_backend(
         self,
         idea: str,
         workspace: Path,
@@ -18,14 +18,6 @@ class BaseAdapter(ABC):
         enable_lint: bool = True,
     ):
         """Execute a task idea inside a workspace with optional recovery/monitoring."""
-        pass
-
-    @abstractmethod
-    def save_current_state(
-        self,
-        path: Path
-    ):
-        """Persist current backend runtime state for later recovery."""
         pass
 
     @abstractmethod
