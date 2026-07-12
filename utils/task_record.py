@@ -34,16 +34,19 @@ def normalize_parquet_task_row(
     """Return a shallow copy of ``row`` with canonical keys filled for this repo's pipeline."""
     out: dict[str, Any] = dict(row)
 
+    # query
     q = _strip_str(out.get("question"))
     if not q:
         q = _strip_str(out.get("Question"))
     out["question"] = q
 
+    # task_id
     tid = out.get("task_id")
     if tid is None or _strip_str(tid) == "":
         tid = out.get("question_ID")
     out["task_id"] = _strip_str(tid) if tid is not None else ""
 
+    # reference_solution
     ref = _strip_str(out.get("reference_solution"))
     if not ref:
         ref = _strip_str(out.get("Final answer"))
@@ -51,6 +54,7 @@ def normalize_parquet_task_row(
         ref = _strip_str(out.get("ground_truth"))
     out["reference_solution"] = ref
 
+    # test
     test_val = out.get("test")
     out["test"] = "" if test_val is None else (test_val if isinstance(test_val, str) else str(test_val))
 
