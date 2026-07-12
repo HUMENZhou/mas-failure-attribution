@@ -6,7 +6,7 @@ from monitor.base_monitor import BaseMonitor, RoleType
 from utils.logging import logger
 
 EDITOR_COMMANDS_DOC = """
-    You can use the following Editor commands (use exact parameter names!):
+    You can use the following Editor commands (**use exact parameter names!**):
 
     - Editor.create_file(filename: str)
     - Editor.insert_content_at_line(file_name: str, line_number: int, insert_content: str)
@@ -18,13 +18,9 @@ EDITOR_COMMANDS_DOC = """
         new_content: str)
     - Editor.open_file(path: str)
 
-    Do NOT use parameters like 'line', 'content', 'file_path', or 'file_name' unless specified above. Always use the exact parameter names and types as listed.
+    Do NOT use parameters like 'line', 'content', 'file_path' 'file_name' unless specified above. Always use the exact parameter names and types as listed.
 
-    When generating code to insert, always:
-    - Output a complete, standalone Python file (including function definition, test cases, and necessary imports).
-    - Start the file with a comment or an empty line before any function/class definition.
-    - Ensure the code is properly indented and syntactically correct.
-    - Do not insert only a function body; always include the full context.
+    After generating the command, ALWAYS check if you have used exact parameter names!
     """
 
 class ThinkMiddleware(Middleware):
@@ -43,6 +39,7 @@ class ThinkMiddleware(Middleware):
         if system_msgs is None:
             system_msgs = [""]
         system_msgs[0] = self.monitor.inject_content(default_value=system_msgs[0])
+        #system_msgs[0] = f'{EDITOR_COMMANDS_DOC}\n{system_msgs[0]}'
         if not self.monitor.is_injected():
             result = self.monitor.get_current_reply()
             return result

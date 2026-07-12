@@ -221,3 +221,6 @@ owl/owl/.env*
 !owl/owl/.env_template
 /dataset/*
 !/dataset/README_ZH_EN.md
+workspace*/*
+output*/*
+*.log*

@@ -1,5 +1,6 @@
 """Core coding-task execution and replay helpers for each round."""
 
+from asyncio import Semaphore
 from enum import Enum
 import json
 import os
@@ -10,11 +11,13 @@ import sys
 from typing import Type
 from urllib.parse import unquote, urlparse
 
+from tqdm.asyncio import tqdm
+
 from adapter.base_adapter import BaseAdapter
 from model.schema import History
 from monitor.attack_monitor import AttackMonitor
 from monitor.base_monitor import BaseMonitor, RoleType
-from utils.common import dumps
+from utils.common import dumps, read_json_file
 from utils.logging import logger
 
 class RunMode(Enum):
@@ -24,7 +27,7 @@ class RunMode(Enum):
     ATTACK = 1
     DIAGNOSE = 2
 
-def run_coding_task(
+async def run_coding_task(
     task: dict,
     workspace: Path,
     output: Path,
@@ -32,6 +35,7 @@ def run_coding_task(
     recovery_dir: Path = None,
     skip_existing: bool = True,
     monitor: BaseMonitor = None,
+    semaphore: Semaphore = None,
 ):
     """
     Execute one coding task and persist structured execution logs.
@@ -49,49 +53,56 @@ def run_coding_task(
     Returns:
         ``True`` when run completes and logs are saved, otherwise ``False``.
     """
-    data_source = task["data_source"]
-    task_id = task["task_id"]
-    idea = (
-        task["question"]
-        + f"I wish you finish the task with a multi-agent cooperation"
-        + f"The file name of your solution MUST be 'solution.py' and MUST be located at root directory"
-    )
-    log = output / 'log.json'
-    if log.exists():
-        if skip_existing:
-            logger.info(f'Log for task {task_id} exists, skipping this round...')
-            return True
-        else:
-            logger.info(f'Log for task {task_id} exists, overriding...')
-            shutil.rmtree(workspace, ignore_errors=True)
-            shutil.rmtree(output, ignore_errors=True)
-            workspace.mkdir(parents=True, exist_ok=True)
-            output.mkdir(parents=True, exist_ok=True)
-    try:
-        backend.run_backend(
-            idea=idea,
-            workspace=workspace,
-            recovery=recovery_dir,
-            monitor=monitor
+    async with semaphore:
+        data_source = task["data_source"]
+        task_id = task["task_id"]
+        signature = task["reference_solution"].split("\n")[0]
+        idea = (
+            task["question"]
+            + f"I wish you finish the task with a multi-agent cooperation"
+            + f"The file name of your solution MUST be 'solution.py' and MUST be located at root directory"
+            + f'The signature of function is {signature}'
         )
-    except Exception as e:
-        logger.error(f"Error running task {data_source}/{task_id}: {e}")
-    
-    logger.info(f'Task {data_source}/{task_id} ends executing...')
-    solution_path = workspace / 'solution.py'
-    if solution_path.exists():
-        model_prediction = solution_path.read_text()
-    else:
-        model_prediction = ""
-        logger.warning(f'solution.py not found for task {data_source}/{task_id}')
-    
-    prompt_map = backend.get_prompt_map()
+        log = output / 'log.json'
+        if log.exists():
+            log_content = read_json_file(log)
+            if log_content['history'] == []:
+                shutil.rmtree(output, ignore_errors=True)
+                output.mkdir(parents=True, exist_ok=True)
+            elif skip_existing:
+                logger.info(f'Log for task {task_id} exists, skipping this round...')
+                return True
+            else:
+                logger.info(f'Log for task {task_id} exists, overriding...')
+                shutil.rmtree(workspace, ignore_errors=True)
+                shutil.rmtree(output, ignore_errors=True)
+                workspace.mkdir(parents=True, exist_ok=True)
+                output.mkdir(parents=True, exist_ok=True)
+        try:
+            await backend.run_backend(
+                idea=idea,
+                workspace=workspace,
+                recovery=recovery_dir,
+                monitor=monitor
+            )
+        except Exception as e:
+            logger.error(f"Error running task {data_source}/{task_id}: {e}")
+        
+        logger.info(f'Task {data_source}/{task_id} ends executing...')
+        solution_path = workspace / 'solution.py'
+        if solution_path.exists():
+            model_prediction = solution_path.read_text()
+        else:
+            model_prediction = ""
+            logger.warning(f'solution.py not found for task {data_source}/{task_id}')
+        
+        prompt_map = backend.get_prompt_map()
 
-    used_roles = set(h.name for h in monitor.history)
-    system_prompts = {
-        name: prompt_map[name]
-        for name in used_roles
-    }
+        used_roles = set(h.name for h in monitor.history)
+        system_prompts = {
+            name: prompt_map[name]
+            for name in used_roles
+        }
 
     with open(log, "w", encoding="utf-8") as f:
         json.dump(
@@ -398,4 +409,21 @@ def run_gaia_task(
             ensure_ascii=False,
             indent=2,
         )
+    return True
+        with open(log, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "question": task["question"],
+                    "question_ID": task["task_id"],
+                    "ground_truth": task["reference_solution"],
+                    "test": task["test"],
+                    "model_prediction": model_prediction,
+                    "history": dumps(monitor.history),
+                    "topology": dumps(monitor.topology),
+                    "system_prompts": system_prompts,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
     return True

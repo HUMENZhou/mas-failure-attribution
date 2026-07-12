@@ -50,7 +50,6 @@ def build_llm_wrapper(func, middlewares):
                     cur_result = result
             if cur_result is not None:
                 result = cur_result
-                logger.info()
             else:
                 result = await func(self, *ctx.args, **ctx.kwargs)
 

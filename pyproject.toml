@@ -49,6 +49,9 @@ packages = [
   "utils",
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 # Optional: include root main.py for `python -m` style; uncomment if you add __main__ later.
 # [tool.hatch.build.targets.sdist]
 # include = ["main.py", "README.md", "pyproject.toml"]

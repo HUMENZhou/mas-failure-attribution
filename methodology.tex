@@ -1,0 +1,659 @@
+%=========================================================================================
+\chapter{方法}
+
+本章节介绍本文提出的一种面向工业级应用的自动化异常数据收集与标注工作流 MALTA （\textbf{M}ulti-\textbf{A}gent Failure \textbf{L}ocalization via \textbf{T}race \textbf{A}nnotation），以及使用 MALTA 收集并构造的 MALTA-3.5K 数据集训练的多智能体系统异常状态归因模型 MALTA-14B 的训练过程。
+
+\section{MALTA: 异常数据收集与标注模块设计}{}
+本文提出了一种面向多智能体系统的异常数据收集与标注工作流 MALTA。
+MALTA 的目标在于构建包含运行过程、交互结构与异常标签的高质量归因数据集，为后续归因模型的训练与评估提供标准化的监督信号。
+整体流程遵循"轨迹采集—结构建模—异常构造—标签生成"的四阶段设计范式，如图~\ref{fig:malta_overview}~所示。
+
+\vspace{5mm}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/all.png}
+   \vspace{5mm} \caption{%
+    MALTA 整体流程概览
+    }
+    
+    \label{fig:malta_overview}
+\end{figure}
+
+MALTA 以精选的六个主流问题集中的问题作为任务输入，结合三个主流多智能体系统作为执行环境，针对采集的基础数据集中的正常轨迹 $T^+$ 与异常轨迹 $T^-$，分别实现了两条不同的工作流：
+
+\textbf{工作流 A}：正常轨迹 $T^+$ 经候选池故障选择 $\to$ 异常注入 $\to$ 轨迹回放验证 $\to$ 对抗式筛选后进入标签生成；
+
+\textbf{工作流 B}：异常轨迹 $T^-$ 经候选池故障选择 $\to$ 异常诊断 $\to$ 反事实回放后进入标签生成。
+
+在工作流 A 和工作流 B 运行发生异常时，则进入以下反馈回路：
+
+\begin{enumerate}
+    \item 轨迹回放未成功将正常变为异常时，返回重新注入；
+    \item 对抗筛选判定为低价值样本时，返回重新注入；
+    \item 轨迹回放未能修复异常时，返回重新诊断。
+\end{enumerate}
+
+针对每条输入问题，MALTA 输出以下三类数据：
+\begin{enumerate}
+  \item \textbf{异常轨迹数据}：多智能体系统在解决该问题过程中产生的、包含注入或真实异常的完整运行轨迹；
+  \item \textbf{拓扑结构}：描述系统中智能体间调用关系与协作依赖的有向图结构；
+  \item \textbf{多点异常标注}：标记异常发生的时间步、责任智能体及异常类型的结构化标签。
+\end{enumerate}
+
+通过上述流程，MALTA 将多智能体系统的运行经验系统性地转化为包含时序轨迹、拓扑结构与细粒度异常标注的高质量数据集 MALTA-3.5K ，为训练具备多点异常归因能力的模型奠定数据基础，以下将按流水线顺序详细介绍六个子模块的设计与工程实现。
+
+% ==============
+
+\subsection{基础数据采集子模块}
+
+基础数据采集子模块是 MALTA 的起点，负责在真实多智能体系统中驱动任务执行，并同步采集完整的运行轨迹与交互拓扑。
+
+其中，运行轨迹主要记录任务执行过程中的动作序列、状态变化、消息交互和反馈结果，用于还原多智能体协作的时序行为；交互拓扑描述智能体之间的调用关系、依赖关系和协作结构，用于刻画异常传播的结构基础。该子模块的作用在于同时保留“时间演化信息”和“交互拓扑信息”，为后续异常分析提供完整上下文，而非仅依赖孤立日志片段。后续在此基础上将采集的原始运行轨迹划分为错误轨迹与正常轨迹两类。
+
+本文通过在多智能体系统中监控请求的收发和系统内部通信信道，实现了时序轨迹数据和交互拓扑信息，收集完成后将其存储为待注入的初步数据，便于后续取用。
+
+ 
+如图~\ref{fig:collect_overview}~所示，该子模块接受两个输入：
+ 
+\begin{itemize}
+  \item \textbf{多智能体系统}：从 $M$ 个候选系统 $\{M_m\}_{m=1}^{M}$ 中选定一个系统 $M_m$，作为任务执行环境；
+  \item \textbf{问题集}：从 $N$ 个候选问题集 $\{Q_n\}_{n=1}^{N}$ 中选定一个问题集 $Q_n$，对其中每个问题 $q \in Q_n$ 依次触发系统运行。
+\end{itemize}
+
+在工程实现上，为兼容架构各异的多智能体系统，MALTA 为每个候选系统 $M_m$ 提供统一的执行后端适配器，规定 \texttt{run\_backend}（任务执行与检查点恢复）与 \texttt{get\_prompt\_map}（角色提示词映射导出）两类核心契约；运行时按名称动态加载对应适配器，使上层采集逻辑无需感知底层框架差异，便于在异构系统间横向扩展。针对不同领域、不同字段命名的问题集，任务记录规范化模块将其统一映射为 \texttt{task\_id}、\texttt{question}、\texttt{reference\_solution}、\texttt{data\_source} 等标准字段，使同一套采集流水线可跨代码生成、数学推理、多模态问答等场景复用。
+
+% 在导言区定义宽度控制（可选）
+% \def\flowwidth{0.7\textwidth}   % 例如 0.7 倍文本宽度
+\begin{figure}[H]
+\centering
+% 方式一：直接 scale 缩放（推荐，简单）
+\begin{tikzpicture}[
+    scale=0.75,   % 整体缩放，数值越小图越窄，请根据实际版面调整
+    % 若需精确控制宽度，可使用 \resizebox，见注释部分
+    node distance=0.5cm and 0.8cm,
+    io/.style={
+      trapezium, trapezium left angle=70, trapezium right angle=110,
+      draw=black!60, fill=gray!8, text width=2.4cm, align=center,
+      minimum height=0.85cm, font=\small
+    },
+    proc/.style={
+      rectangle, rounded corners=4pt, draw=blue!60, fill=blue!7,
+      text width=3.2cm, align=center, minimum height=1.0cm, font=\small
+    },
+    store/.style={
+      cylinder, shape border rotate=90, draw=teal!60, fill=teal!7,
+      text width=2.4cm, align=center, minimum height=1.0cm, font=\small,
+      aspect=0.2
+    },
+    split/.style={
+      rectangle, rounded corners=3pt, draw=purple!60, fill=purple!7,
+      text width=3.0cm, align=center, minimum height=0.85cm, font=\small
+    },
+    out1/.style={
+      rectangle, rounded corners=3pt, draw=green!60!black, fill=green!8,
+      text width=2.6cm, align=center, minimum height=0.8cm, font=\small
+    },
+    out2/.style={
+      rectangle, rounded corners=3pt, draw=red!60, fill=red!8,
+      text width=2.6cm, align=center, minimum height=0.8cm, font=\small
+    },
+    arr/.style={-Stealth, thick, draw=black!55}
+  ]
+
+    %% ========== 纵向布局：从顶部到底部 ==========
+    %% 第1层：执行节点（中心）
+    \node[proc] (exec) { $M_m$ 执行问题 $q$\\（请求/通信监控） };
+
+    %% 第2层：输入节点（位于 exec 上方左右两侧）
+    \node[io, above left=0.7cm and 0.3cm of exec] (mas) {多智能体\\系统 $M_m$};
+    \node[io, above right=0.7cm and 0.3cm of exec] (qs) {问题集 $Q_n$\\问题 $q$};
+
+    %% 第3层：采集结果（位于 exec 下方，左右并排）
+    \node[store, below left=0.8cm and 0.3cm of exec] (traj) {时序\\轨迹 ${T}$};
+    \node[store, below right=0.8cm and 0.3cm of exec] (topo) {拓扑\\结构 $\mathit{Topo}$};
+
+    %% 第4层：划分节点（位于 traj 和 topo 的下方中央）
+    \node[split, below=4.0cm of exec] (split) {轨迹划分};
+
+    %% 第5层：输出节点（位于 split 下方，左右并排）
+    \node[out1, below left=0.7cm and 0.3cm of split] (succ) {${T}^{+}$\\（成功轨迹）};
+    \node[out2, below right=0.7cm and 0.3cm of split] (fail) {${T}^{-}$\\（失败轨迹）};
+
+    %% ========== 箭头连接 ==========
+    \draw[arr] (mas) -- (exec);
+    \draw[arr] (qs)  -- (exec);
+    \draw[arr] (exec) -- (traj);
+    \draw[arr] (exec) -- (topo);
+    \draw[arr] (traj) -- (split);
+    \draw[arr] (topo) -- (split);
+    \draw[arr] (split) -- (succ);
+    \draw[arr] (split) -- (fail);
+
+    %% 标注（同步写入）
+    \node[font=\tiny, text=teal!70, above=0.05cm of traj] {同步写入};
+    \node[font=\tiny, text=teal!70, above=0.05cm of topo] {同步写入};
+
+\end{tikzpicture}
+
+%% 方式二：使用 \resizebox 精确控制宽度（取消注释并注释掉 scale 选项）
+% \resizebox{0.7\textwidth}{!}{%
+%   \begin{tikzpicture}[
+%       node distance=0.5cm and 0.8cm,
+%       ... % 同上代码
+%     ]
+%     ...
+%   \end{tikzpicture}%
+% }
+\vspace{5mm}
+\caption{基础数据采集子模块流程}
+\label{fig:collect_overview}
+\end{figure}
+
+其中，时序轨迹 $ T $ 记录任务执行过程中的完整动态行为，包括动作序列、状态变化、消息交互和反馈结果，用于还原多智能体协作的时序演化过程。
+
+\begin{table}[htbp]
+  \centering
+  \caption{轨迹事件字段说明}
+  \label{tab:traj_fields}
+  \renewcommand{\arraystretch}{1.3}
+  \begin{tabular}{cll}
+    \hline
+    \textbf{字段} & \textbf{含义} & \textbf{示例} \\
+    \hline
+    $\mathrm{step}_k$    & 事件时间步编号（全局单调递增） & $\mathrm{step}_3 = 3$ \\
+    $\mathrm{role}_k$    & 消息角色类型                & \texttt{Assistant} \\
+    $\mathrm{name}_k$    & 执行该步骤的智能体名称      & \texttt{Team Leader}、\texttt{Engineer} \\
+    $\mathrm{content}_k$ & 该步骤的完整输出内容        & 思考过程、指令、代码、工具调用 JSON 等 \\
+    \hline
+  \end{tabular}
+\end{table}
+ 
+形式化地，设系统包含 $n$ 个智能体 $\mathcal{A} = \{a_1, a_2, \ldots, a_n\}$，问题 $q$ 的一次执行轨迹$ T $定义为按时间步排列的事件序列：
+\begin{equation}
+  T = \bigl\langle e_1,\, e_2,\, \ldots,\, e_T \bigr\rangle, \quad
+  e_k = (\mathrm{step}_k,\; \mathrm{role}_k,\; \mathrm{name}_k,\; \mathrm{content}_k)
+  \label{eq:traj}
+\end{equation}
+其中各字段含义如表~\ref{tab:traj_fields}~所示。
+
+ 
+对于问题集 $Q_n$ 中的所有问题，系统 $M_m$ 产生的全量轨迹集合记为：
+\begin{equation}
+  T_{all} = \{T^{(q)}\}_{q \in Q_n}
+\end{equation}
+
+运行拓扑 $\mathit{Topo}$ 描述多智能体系统内部的调用关系、依赖关系与协作结构，是刻画异常传播路径的结构基础。本文将其形式化为有向图 $\mathcal{G}$：
+\begin{equation}
+  \mathit{Topo} = \mathcal{G} = (\mathcal{A},\, \mathcal{E})
+\end{equation}
+其中节点集 $\mathcal{A}$ 为系统中的所有智能体，有向边集 $\mathcal{E}$ 满足：
+\begin{equation}
+  (a_i,\, a_j) \in \mathcal{E} \;\Longleftrightarrow\; a_i \text{ 在执行过程中调用或向 } a_j \text{ 传递依赖信息}
+\end{equation}
+拓扑图与轨迹数据互补：轨迹捕捉"时间维度"上事件的先后顺序，拓扑刻画"空间维度"上智能体的协作结构，二者共同构成后续归因分析所需的完整上下文。
+
+在工程实现层面，本研究通过在多智能体系统中监控请求的收发和系统内部通信信道，实现对上述两类数据的无侵入式同步采集。具体而言，基于钩子链（Hook Chain）的中间件在不修改多智能体系统源码的前提下，于消息观测路径上实时解析发送方与接收方角色，以有向边 $(a_i, a_j)$ 增量写入拓扑图；于语言模型推理路径上将每步输出封装为 $(\mathrm{step}_k, \mathrm{role}_k, \mathrm{name}_k, \mathrm{content}_k)$ 事件并追加至历史序列。监控器作为运行时状态中心维护全局步计数器、事件历史与有向拓扑图，两类数据在同一步骤边界上原子性同步，确保轨迹与拓扑的时间对齐关系不被破坏。采集完成后，轨迹数据与拓扑信息连同角色提示词快照一并写入 \texttt{log.json} 持久化存储，统一封装 \texttt{history}、\texttt{topology}、\texttt{system\_prompts} 与 \texttt{model\_prediction} 等字段，供后续各子模块直接消费，无需重复运行系统。
+
+基线采集以 Round~0 为调度单元，对问题集 $Q_n$ 中全部问题并行触发执行：基于信号量控制的异步并发执行器支持数百条任务同时采集，配合 \texttt{skip\_existing} 幂等跳过策略，可在断点续跑时避免重复计算，显著缩短大规模数据集的构建周期。采集结束后，针对不同任务类型（代码执行、数学判题、GAIA 基准等）调用相应评估子模块判定任务成败，并以布尔成功标志将全量轨迹集合 $T$ 自动划分为两个子集，分别路由至后续两条处理支路：
+ 
+\begin{itemize}
+  \item 成功轨迹集（${T}^{+}$）：任务最终成功完成的轨迹，作为正确轨迹异常注入子模块的输入，用于构造可控的人工异常样本；
+  \item 失败轨迹集（${T}^{-}$）：任务执行失败或输出错误的轨迹，作为错误轨迹回放子模块的输入，用于反事实回放与根因识别。
+\end{itemize}
+ 
+该子模块通过同时保留"时间演化信息"（${T}$）和"交互拓扑信息"（$\mathit{Topo}$），为后续异常分析提供完整上下文，从根本上避免了仅依赖孤立日志片段所带来的归因歧义。
+
+\subsection{异常错误候选池}
+
+本部分参考了现有工作~\cite{cemri2025why, DBLP:journals/corr/abs-2509-23735}对多智能体系统异常的分类，构建了多点异常错误候选池。异常错误候选池包含导致系统失效的关键错误模式、候选故障位置和交互失配类型。
+候选池从错误类型、故障步骤、错误关联三个维度组织先验知识，为后续反事实回放和故障注入提供统一的先验约束与操作空间，使异常构造过程具备针对性、可控性和可复用性。
+
+
+本文将多智能体系统中的故障按照发生层次划分为三大类，形成层次化的分类框架，表~\ref{tab:fault_taxonomy}~给出了候选池中全部 16 种故障类型的编号、名称、描述与影响。
+ 
+\begin{table}[H]
+\centering
+\caption{多点异常错误候选池分类表}
+\label{tab:fault_taxonomy}
+\begin{tabular}{p{1.5cm} p{4.5cm} p{4.5cm}}
+\hline
+\textbf{编号} & \textbf{故障类型} & \textbf{影响} \\
+\hline
+\multicolumn{3}{l}{\textbf{F1~~单智能体层故障}} \\
+\hline
+F1-1 & 工具规划错误 & 降低结果质量 \\[3pt]
+F1-2 & 响应格式错误 & 破坏通信与解析 \\[3pt]
+F1-3 & 响应内容偏离 & 强烈降低质量 \\[3pt]
+F1-4 & 知识与推理局限 & 答案错误不完整 \\[3pt]
+F1-5 & 提示设计缺陷 & 输出大幅退化 \\[3pt]
+F1-6 & 语言与编码缺陷 & 破坏通信或解析 \\[3pt]
+F1-7 & 工具调用错误 & 中断执行链 \\[3pt]
+\hline
+\multicolumn{3}{l}{\textbf{F2~~工作流协作层故障}} \\
+\hline
+F2-1 & 输入验证缺失 & 触发执行错误 \\[3pt]
+F2-2 & 节点依赖不合理 & 阻止下游节点 \\[3pt]
+F2-3 & 循环与死锁 & 直接中断执行 \\[3pt]
+F2-4 & 条件判断错误 & 产生错误结果 \\[3pt]
+F2-5 & 任务分解不当 & 损害一致性 \\[3pt]
+F2-6 & 上下文冲突 & 输出次优或矛盾 \\[3pt]
+F2-7 & 跨智能体失配 & 解析失败中断 \\[3pt]
+\hline
+\multicolumn{3}{l}{\textbf{F3~~平台环境层故障}} \\
+\hline
+F3-1 & 网络与资源波动 & 导致运行时失败 \\[3pt]
+F3-2 & 服务不可用 & 立即导致失败 \\[3pt]
+\hline
+\end{tabular}
+\end{table}
+
+候选池在 MALTA 流程中发挥双重作用，一方面作为先验约束，在错误轨迹回放阶段，候选池限定干预操作的类型与范围，确保反事实分析的可解释性；另一方面作为注入词表，在正确轨迹异常注入阶段，候选池提供结构化的故障描述，驱动注入策略模型生成针对性的干预指令。
+ 
+MALTA 可以通过故障的终止特性等属性来精确选择错误类型，例如：F1-2（响应格式错误）、F2-2（节点依赖不合理）、F2-7（跨智能体接口失配）和 F3-2（服务不可用）属于高终止率故障——其发生通常直接中断任务执行；而 F1-3（响应内容偏离）、F1-5（提示设计缺陷）和 F2-5（任务分解不当）属于低终止率/质量退化型故障——系统仍能完成执行但输出大幅退化，对评估模型的归因能力具有更高挑战性。这些区分为后续对抗式样本筛选提供了重要参考依据。
+
+在工程实现上，候选池以结构化故障词表形式维护，每条故障类型均配有唯一类型码与文本描述，在异常注入与反事实诊断阶段由分析模块动态加载并注入提示词上下文，驱动策略模型生成包含 \texttt{step\_id}、目标智能体与 \texttt{fault\_code} 的干预计划。该设计将领域先验知识与流水线执行解耦：候选池可独立扩展或修订，而注入、回放与标注模块无需随之改动，保障了异常构造流程的可维护性与可复用性。
+
+\subsection{错误轨迹回放子模块}
+
+在错误轨迹回放子模块，MALTA 对已有错误轨迹 $T^-$ 执行反事实回放。其核心思想为通过"如果当时的动作不同，结果是否会改变"这一反事实问题，系统性地识别轨迹中对最终失败具有决定性影响的关键步骤，将其与大量不相关的次生错误或表面现象区分开来。算法~\ref{alg:replay}~描述了反事实回放的基本过程。
+
+\vspace{5mm}
+\begin{algorithm}[H]
+  \caption{反事实回放算法}
+  \label{alg:replay}
+  \KwIn{错误轨迹 $T^- = \langle e_1, e_2, \ldots, e_T \rangle$，候选干预集合 $\mathcal{I}$}
+  \KwOut{根因步骤集合 $\mathcal{R}$，传播路径 $\mathcal{P}$}
+  $\mathcal{R} \leftarrow \emptyset$\;
+  \For{$k = 1$ \KwTo $T$}{
+      $\iota \leftarrow get\_diagnosis(k)$ \;
+      构造反事实轨迹 $\tilde{T} \leftarrow \text{Intervene}(T^-, k, \iota)$\;
+      在 MAS 中回放 $\tilde{T}$，获取结果 $\tilde{r}$\;
+      \If{$\tilde{r}$ 恢复正常}{
+        将 $(k, \iota)$ 加入 $\mathcal{R}$\;
+        记录传播路径变化至 $\mathcal{P}$\;
+      }
+    
+  }
+  \Return $\mathcal{R}$，$\mathcal{P}$\;
+\end{algorithm}
+
+\vspace{5mm}
+上述算法描述了 MALTA 反事实回放子模块的核心执行流程。算法以已发生的错误轨迹 $T^-$（由事件序列 $\langle e_1, e_2, \ldots, e_T \rangle$ 构成）和候选干预集合 $\mathcal{I}$ 为输入，通过逐步骤的诊断干预来定位根因。对于轨迹中的每个步骤 $k$，算法首先获取针对该步骤的诊断信息 $\iota$（通常包括对关键输入或交互的替换操作），然后基于原错误轨迹构造一个反事实轨迹 $\tilde{T}$：即在步骤 $k$ 处应用干预 $\iota$，其余步骤保持不变。接着，将该反事实轨迹在真实或模拟的多智能体系统环境中回放，观察执行结果 $\tilde{r}$。如果回放结果恢复正常（即异常不再发生或系统行为符合预期），则判定步骤 $k$ 及其对应的干预 $\iota$ 为潜在的根因，将其加入根因步骤集合 $\mathcal{R}$，并记录从该步骤出发的异常传播路径变化至 $\mathcal{P}$。通过遍历所有步骤，算法最终输出识别出的根因步骤集合以及相应的传播路径信息，从而帮助分析人员从因果层面确定引发异常的关键环节与责任主体，避免仅依据表面结果进行归因。
+ 
+这一过程有一个重要的工程细节，即干预的最小化原则：修正内容 $\mathrm{content}'_k$ 应仅纠正该步骤的局部错误，而不直接揭示后续所有步骤的最优解，以确保归因的因果纯粹性，避免"过度修正"掩盖其他潜在根因。
+
+在工程实现上，反事实回放由工作流 B 的轮次调度自动驱动：对 Round~0 评估为失败的样本，诊断分析模块基于 \texttt{log.json} 中的轨迹、拓扑与候选池先验生成逐步骤修复建议，注入感知监控器据此在目标步骤 $k$ 将建议写入系统提示词或替换该步历史回复，并从第 $k$ 步起在真实多智能体系统中分叉重放，其余步骤保持原始轨迹不变。系统将 Round~0 采集的完整运行状态（历史序列、拓扑快照与检查点）从持久化存储中恢复，保障长链路实验的可中断续跑。干预效果与最终任务成败由领域评估模块直接量化，无需离线模拟或人工标注；若回放未能使任务由失败转为成功，流水线自动触发反馈回路，将样本返回诊断模块重新分析。
+ 
+此外，反事实回放还承担着一个重要的质量控制职能：当对轨迹中所有候选步骤的干预均无法使系统恢复正常时，触发反馈回路将轨迹返回异常诊断子模块重新分析，可能意味着该样本存在多个相互依赖的复合根因，需要添加候选池中的故障假设重新尝试。
+ 
+\subsection{正确轨迹异常注入子模块}
+正确轨迹异常注入子模块基于候选池中的先验信息，在正常运行轨迹 $T^+$ 中主动注入候选故障，以构造更加丰富和可控的异常样本。注入操作从多点故障候选池进行决定，弥补了真实错误轨迹稀缺的问题，扩展异常场景覆盖范围，并增强数据集中复杂异常模式的多样性，算法具体流程如图~\ref{fig:injection}~表示：
+
+\vspace{5mm}
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance = 0.7cm and 2.2cm,  % 垂直间距和水平间距
+  auto,
+  % 样式
+  startstop/.style = {
+    rectangle, rounded corners, minimum width=2.8cm, minimum height=0.8cm,
+    text centered, font=\footnotesize\bfseries,
+    draw=teal!70!black, fill=teal!10, drop shadow
+  },
+  process/.style = {
+    rectangle, minimum width=2.8cm, minimum height=0.8cm,
+    text centered, font=\footnotesize,
+    draw=cyan!70!black, fill=cyan!5, drop shadow
+  },
+  decision/.style = {
+    diamond, minimum width=3.0cm, minimum height=1.1cm, aspect=2,
+    text centered, font=\footnotesize,
+    draw=orange!80!black, fill=yellow!10, drop shadow
+  },
+  data/.style = {
+    rectangle, rounded corners=6pt, minimum width=2.2cm, minimum height=0.9cm,
+    text centered, font=\footnotesize,
+    draw=purple!70!black, double, double distance=1.5pt, line width=0.6pt,
+    fill=purple!5, drop shadow
+  },
+  cloud/.style = {
+    draw, ellipse, minimum width=2.2cm, minimum height=0.9cm,
+    text centered, font=\footnotesize, fill=gray!8, drop shadow
+  },
+  line/.style = {draw, -Latex, thick},
+  return/.style = {draw, -Latex, thick, dashed, rounded corners=8pt},
+]
+
+  % ================= 中心主流程（垂直） =================
+  \node (normal)    [startstop]                      {正常轨迹 $T^+$};
+  \node (select)    [process, below=of normal]       {选择目标智能体};
+  \node (inject)    [process, below=of select]       {单点故障注入};
+  \node (play)      [process, below=of inject]       {执行回放与影响评估};
+  \node (fatal)     [decision, below=of play]        {是否产生致命影响？};
+  \node (keep)      [process, below=of fatal]        {保留故障，更新异常轨迹};
+  \node (cont)      [decision, below=of keep]        {是否继续注入？};
+  \node (out)       [startstop, below=of cont]       {高价值异常轨迹};
+  \node (root)      [process, below=of out]          {标注“最早决定性错误”作为根因};
+
+  % ================= 左右辅助模块 =================
+  \node (topo)      [cloud, left=of select]          {交互拓扑图};
+  \node (pool)      [data, right=of inject]          {多点故障候选池};
+
+  % ================= 背景：多轮循环框 =================
+  \begin{pgfonlayer}{background}
+    \node [draw=gray, dashed, thick, inner sep=10pt, rounded corners,
+           fit=(select) (inject) (play) (fatal) (keep) (cont)]
+           (loopbox) {};
+    \node [font=\footnotesize\bfseries, gray, anchor=north west] at (loopbox.north west) {多轮注入循环};
+  \end{pgfonlayer}
+
+  % ================= 连线 =================
+  % 主路径
+  \draw [line] (normal) -- (select);
+  \draw [line] (select) -- (inject);
+  \draw [line] (inject) -- (play);
+  \draw [line] (play) -- (fatal);
+  \draw [line] (fatal) -- node[anchor=east, font=\footnotesize] {是} (keep);
+  \draw [line] (keep) -- (cont);
+  \draw [line] (cont) -- node[anchor=east, font=\footnotesize] {否} (out);
+  \draw [line] (out) -- (root);
+
+  % 辅助输入
+  \draw [line] (topo) -- (select);
+  \draw [line] (pool) -- (inject);
+
+  % 返回路径（致命影响＝否） -> 回到选择
+  \draw [return] (fatal.west) -- ++(-1.0,0) |- (select.west) 
+        node[pos=0.25, anchor=south, font=\footnotesize] {否（舍弃）};
+
+  % 返回路径（继续注入＝是） -> 回到选择
+  \draw [return] (cont.east) -- ++(1.0,0) |- (select.east)
+        node[pos=0.25, anchor=south, font=\footnotesize] {是（下一轮）};
+
+\end{tikzpicture}
+\vspace{5mm}
+\caption{多点故障注入机制流程图（中心主流程布局）}
+\label{fig:injection}
+\end{figure}
+
+由于不同错误之间会共享依赖、互相诱发或共同被一次修复缓解的问题，因此本文提出多点归因，将单点归因扩展至更符合真实多智能体系统特征的多错误耦合归因场景。 MALTA 采用多点注入模块用于构造多因多果故障，但不采用一次性同时注入多个故障的方式，而是采用多轮注入机制：在每一轮中仅注入一个故障，并在该轮执行后判断该故障是否对最终结果构成致命影响；若是，则在更新后的轨迹基础上进入下一轮，再继续注入下一个故障。
+
+具体而言，系统首先基于交互拓扑图选定一个目标智能体，并结合错误候选池完成当前轮的单点故障注入。随后，对注入后的轨迹进行执行回放，并评估该轮注入是否使任务结果发生不可恢复的偏转，或显著改变后续智能体的协作行为。若该故障未形成足够影响，则舍弃该次注入或重新选取新的故障类型；若该故障被判定为具有致命影响，则将其保留，并以该更新后的异常轨迹作为下一轮注入的输入。
+
+通过多轮重复上述过程，可在同一轨迹中逐步叠加多个彼此关联的关键故障，形成具有因果累积效应和传播效应的复杂异常样本。由于每轮只保留对结果具有实质影响的故障，因此最终得到的多点样本并非若干弱扰动的简单叠加，而是多个关键故障共同作用形成的高价值异常轨迹。当算法成功对每条轨迹注入有效错误，或者达到规定的最大轮数，算法即中止。
+
+在工程层面，多轮注入循环由工作流 A 的轮次调度自动驱动：对 Round~0 评估为成功的样本，注入策略模型基于当前 \texttt{log.json}、交互拓扑与候选池先验生成结构化注入计划，注入感知监控器在指定步骤配置单点干预并在真实系统中回放验证；领域评估模块判定该轮注入是否产生致命影响后，流水线自动保留有效故障并决定是否进入下一轮，直至达到最大轮数或无法继续注入为止。每轮注入历史以 \texttt{attack\_analysis.json} 增量累积，注入计划本身即构成后续标签生成的直接监督信号，实现了"构造—验证—标注"的一体化闭环，全程无需人工介入。
+
+为了与传统的单点归因取得标注一致性，与传统单点归因类似的，本文采用“最早决定性错误”作为根因：如果修复某个智能体在某一步的错误能让失败轨迹变成成功，那么这个错误就是决定性错误，当存在多个决定性错误时，采用“最早发生的决定性错误”作为最终根因。
+
+\subsection{对抗式样本筛选子模块}
+为确保数据集对现有大语言模型（LLM）具有足够挑战性，MALTA 引入对抗式样本筛选机制。当LLM能够准确归因时，判定为低价值样本予以淘汰；当LLM无法准确定位时，判定为高价值难例纳入数据集。如图~\ref{fig:adv_filter}~所示。
+ 
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance=0.55cm and 0.9cm,
+    sbox/.style={rectangle, rounded corners=3pt, draw=black!65, fill=blue!7,
+                 text width=2.5cm, align=center, minimum height=0.9cm, font=\small},
+    dbox/.style={diamond, draw=black!65, fill=yellow!12,
+                 text width=1.6cm, align=center, inner sep=1pt, font=\small},
+    good/.style={rectangle, rounded corners=3pt, draw=green!60!black, fill=green!10,
+                 text width=2.0cm, align=center, minimum height=0.8cm, font=\small},
+    bad/.style={rectangle, rounded corners=3pt, draw=red!60, fill=red!8,
+                text width=2.0cm, align=center, minimum height=0.8cm, font=\small},
+    arr/.style={-Stealth, thick, draw=black!60}
+  ]
+    \node[sbox] (strat)  {注入策略\\模型};
+    \node[sbox, right=of strat]  (exec)   {注入\\执行器};
+    \node[sbox, right=of exec]   (llm)    {LLM\\自动分析};
+    \node[dbox, right=of llm]    (eval)   {归因\\准确？};
+    \node[good, right=of eval]   (keep)   {高价值\\难例};
+    \node[bad,  below=0.8cm of eval]  (drop)   {低价值\\样本};
+ 
+    \draw[arr] (strat) -- (exec) node[midway,above,font=\tiny]{注入指令};
+    \draw[arr] (exec)  -- (llm)  node[midway,above,font=\tiny]{轨迹数据};
+    \draw[arr] (llm)   -- (eval) node[midway,above,font=\tiny]{归因结果};
+    \draw[arr] (eval)  -- node[above,font=\small]{否} (keep);
+    \draw[arr] (eval)  -- node[right,font=\small]{是} (drop);
+ 
+    %% 淘汰反馈
+    \draw[-Stealth, dashed, draw=red!50, thick]
+      (drop.west) -- ++(-0.4,0) |- (strat.south)
+      node[pos=0.25, right, font=\tiny, text=red!60]{反馈更新};
+  \end{tikzpicture}
+  \caption{对抗式样本筛选子模块流程}
+  \label{fig:adv_filter}
+\end{figure}
+ 
+该子模块由 LLM 自动分析器 与评估器两大组件协同构成。其中，LLM 自动分析器借助当前先进的大语言模型，对经过扰动注入后的轨迹数据进行自动化分析，输出故障主体（即引发异常的具体模块或组件）与故障类型（如逻辑错误、时序异常等），作为归因预测结果。紧接着，评估器基于该归因结果对样本质量进行判别：若某一异常样本能够被现有模型以高置信度准确识别，并且故障定位结果与真实情况高度吻合，说明该样本易于学习、信息冗余，因此被判定为低价值样本，直接淘汰出数据集；反之，若样本无法被模型准确定位故障来源，或者模型输出的置信度偏低、预测结果模糊不定，则表明该样本对当前模型构成挑战，属于高价值的“难例”，将被保留并纳入后续训练数据集。
+
+通过这种对抗式筛选机制，MALTA 能够持续、动态地淘汰那些容易被现有大模型识别的低质量样本，使得数据集中冗余、简单的异常模式被自动过滤；同时，系统重点保留那些对当前模型仍具挑战性、包含复杂或隐蔽异常模式的高质量样本。最终，这些精心筛选出的难例被用于归因模型的迭代训练，不断提升模型在复杂场景下的故障定位与归因能力。
+
+在工程实现上，对抗筛选嵌入工作流 A 的注入—回放闭环：注入执行器完成扰动后，将更新后的 \texttt{log.json} 提交给 LLM 自动分析器进行归因预测，评估器将预测结果与注入计划中的真实标签比对；判定为低价值样本时，淘汰结果经反馈通道回传至注入策略模型，驱动下一轮生成更具挑战性的干预方案。该机制使数据集质量随筛选轮次持续提升，而无需额外人工复审。
+
+\subsection{标签生成子模块}
+标签生成子模块对反事实回放和故障注入所得的异常轨迹进行自动化标注，是 MALTA 数据流水线的最后一道工序，负责将前序模块产出的异常轨迹转化为可直接用于模型训练的结构化监督信号。
+ 
+每条轨迹的标签 $\mathcal{L}$ 定义为所有异常发生时刻的三元组集合：
+\begin{equation}
+  \mathcal{L} = \{(\mathrm{step}_k,\, \mathrm{name}_k,\, \text{type}_k)\}_{k \in \mathcal{F}}
+\end{equation}
+其中 $\mathcal{F}$ 为异常发生的关键时间步集合，$\mathrm{step}_k$ 为时间步编号，$\mathrm{name}_k$ 为在该步骤执行动作的责任智能体名称，$\text{type}_k$ 为对应的异常类型代码（来自多点异常错误候选池的 16 种故障类型之一）。
+ 
+对于来自反事实回放路径的样本，标签由回放过程直接确定：令系统从失败状态恢复为成功状态的最早干预步骤即为根因步骤 $t^*$，对应的执行智能体即为责任智能体 $a^*$，故障类型则根据干预操作的类别从候选池中映射得到，标注精度由因果机制保证。
+ 
+对于来自故障注入路径的样本，标签在构造过程中已经确定：注入计划 $\mathcal{P}_{\text{inj}}$ 明确记录了注入位置、目标智能体和故障类型，若注入成功诱发失败则直接将注入计划作为标签，无需额外标注推断，实现了零人工干预的精确标注。
+
+在工程实现上，标签生成子模块直接消费前序各轮次产出的结构化中间文件：反事实回放路径从诊断分析结果与回放评估结论中提取根因三元组，故障注入路径从 \texttt{attack\_analysis.json} 中读取已验证的注入计划；两类路径的输出均与 \texttt{log.json} 中的 \texttt{history} 字段按 \texttt{step\_id} 对齐后写入最终样本记录。该设计使标注过程与前序采集、注入、回放模块完全解耦，各子模块可独立迭代升级，而标签格式始终保持统一，便于下游归因模型训练直接加载。
+ 
+该子模块为后续归因模型训练和效果分析提供标准化监督信号，使数据集不仅包含"发生了什么"，还进一步包含"何时出错、谁导致出错、属于哪类故障"以及"多点故障之间如何传播"的完整结构化标签信息，弥补了现有数据集仅有单点粗粒度标注的不足。
+
+
+\section{归因模型训练模块}
+ 
+归因模型训练模块的目标是在此基础上学习异常的形成规律、传播机制与责任分布关系，构建能够面向复杂场景进行归因的核心模型。本方案采用"监督微调热启动—强化学习对齐优化"的渐进式训练范式，将通用基座模型训练为面向复杂协同场景的归因专家模型，具体流程如算法 ~\ref{alg:training} 所示。
+
+\begin{algorithm}[H]
+  \caption{归因模型渐进式训练流程}
+  \label{alg:training}
+  \KwIn{异常数据集 $\mathcal{D}$，基座模型 $\pi_{\text{base}}$，组大小 $G$，KL系数 $\beta$}
+  \KwOut{归因专家模型 $\pi^*$}
+ 
+  \tcc{阶段一：监督微调}
+  $\pi_0 \leftarrow \text{SFT}(\pi_{\text{base}},\; \mathcal{D})$\;
+ 
+  \tcc{阶段二：GRPO 强化学习对齐}
+  $\pi_\theta \leftarrow \pi_0$\;
+  \For{每个训练步}{
+    从 $\mathcal{D}$ 采样输入 $\mathcal{X}$ 及真实标签 $\mathcal{Y}^*$\;
+    \tcc{组采样}
+    $\{\hat{\mathcal{Y}}_i\}_{i=1}^G \sim \pi_\theta(\cdot \mid \mathcal{X})$\;
+    \tcc{多粒度奖励计算}
+    \For{$i = 1$ \KwTo $G$}{
+      $r_i \leftarrow R_{\text{format}}(\hat{\mathcal{Y}}_i) + \mathbb{1}[R_{\text{format}}=1] \cdot R_{\text{logic}}(\hat{\mathcal{Y}}_i, \mathcal{Y}^*)$\;
+    }
+    \tcc{组内归一化}
+    $A_i \leftarrow (r_i - \mu_G) / (\sigma_G + \epsilon)$\;
+    \tcc{策略更新（含KL约束）}
+    $\theta \leftarrow \theta - \nabla_\theta \mathcal{L}_{\text{GRPO}}(\theta)$\;
+  }
+  $\pi^* \leftarrow \pi_\theta$\;
+  \Return $\pi^*$\;
+\end{algorithm}
+
+\vspace{5mm}
+第一阶段使用异常数据集对基座模型进行有监督微调，得到初始模型，使其初步具备归因知识与热启动能力。第二阶段在初始模型基础上采用组相对策略优化（GRPO）进一步微调：每一训练步中，首先对同一输入采样多个候选输出，然后计算每个候选的多粒度奖励，该奖励由格式正确性、归因准确性和责任拓扑匹配度三项加权组合而成；之后在组内对奖励进行归一化处理以降低梯度估计的方差，最后更新策略参数，其优化目标中显式包含 KL 散度约束项，用以限制新策略偏离初始模型的程度。训练反复迭代直至满足收敛条件之一：达到预设的最大训练步数；或连续若干步内组平均奖励的相对变化低于设定阈值；或当前策略与初始模型之间的 KL 散度持续小于预设下界。此时模型已稳定收敛，输出最终的归因专家模型。
+
+\subsection{监督微调子模块}
+ 
+监督微调（Supervised Fine-Tuning，SFT）子模块的作用是完成从通用基座模型到领域专家模型的能力迁移，为后续强化学习策略优化提供稳定初始化。
+ 
+本阶段的输入利用模块一输出的异常数据集 $\mathcal{D}$，将每条样本组织为"结构化输入—结构化输出"对，将四类信息拼接为统一的输入上下文 $\mathcal{X}$：
+\begin{equation}
+  \mathcal{X} = [\,T,\; \mathcal{G},\; \mathcal{C},\; \mathcal{P}_{\text{prior}}\,]
+\end{equation}
+其中 $T$ 为任务运行轨迹，$\mathcal{G}$ 为交互拓扑图，$\mathcal{C}$ 为异常类型先验（来自候选池），$\mathcal{P}_{\text{prior}}$ 为因果图谱中的候选传播路径。
+
+结构化诊断输出则对应的监督目标 $\mathcal{Y}$ 由真实标签构成：
+\begin{equation}
+  \mathcal{Y} = (\,\mathcal{R}^*,\; \mathcal{A}^*,\; \mathcal{P}^*,\; \text{type}^*\,)
+\end{equation}
+其中 $\mathcal{R}^*$ 为根因步骤集合，$\mathcal{A}^*$ 为责任智能体，$\mathcal{P}^*$ 为真实异常传播路径，$\text{type}^*$ 为故障类型标签。
+ 
+SFT 阶段以最大化条件对数似然 $ \mathcal{L}_{\text{SFT}} $ 为训练目标：
+\begin{equation}
+  \mathcal{L}_{\text{SFT}} = -E_{(\mathcal{X}, \mathcal{Y}) \sim \mathcal{D}}\bigl[\log \pi_\theta(\mathcal{Y} \mid \mathcal{X})\bigr]
+\end{equation}
+通过在标注数据上的监督训练，模型初步习得"基于因果结构进行根因定位与路径生成"的基本能力，参数从通用基座 $\pi_{\text{base}}$ 更新至初始化专家模型 $\pi_0$。由此，监督微调子模块将预训练模型的通用语义理解能力与领域特定的因果归因知识相融合，使模型初步具备“依据因果图谱进行根因定位、责任智能体识别及异常传播路径生成”的基础能力，从而为下一阶段的强化学习对齐提供稳定、高性能的初始策略模型。
+
+\subsection{多粒度奖励设计子模块}
+
+多粒度奖励设计子模块的目的是在强化学习阶段同时约束归因的输出格式与内容质量，兼顾单点归因与多点归因场景，并通过去重与惩罚机制防止模型通过重复预测同一步骤来规避惩罚。奖励函数 $R$ 采用门控结构：仅当格式奖励达满分时，逻辑奖励才被激活：
+\begin{equation}
+  R = \begin{cases}
+    R_{\text{format}}, & R_{\text{format}} < 1 \\
+    R_{\text{format}} + R_{\text{logic}}, & R_{\text{format}} = 1
+  \end{cases}
+  \label{eq:reward_v3}
+\end{equation}
+这一设计强制模型首先保证输出合法，再追求内容正确，避免模型在格式残缺的情况下仍获得逻辑奖励。
+ 
+格式奖励 $R_{\text{format}} \in [0,1]$ 由三个子项累加构成：
+\begin{equation}
+  R_{\text{format}} = R_{\text{json}} + R_{\text{root}} + R_{\text{item}}
+\end{equation}
+ 其中，$R_{\text{json}}$ 检验输出是否为可解析的 JSON 对象；$R_{\text{root}}$ 检验顶层是否包含合法的 \texttt{root\_causes} 列表；$R_{\text{item}}$ 按预测条目的字段完整度打分：
+\begin{equation}
+  R_{\text{item}} = \begin{cases}
+    0.5 \cdot \dfrac{1}{k}\displaystyle\sum_{i=1}^{k} \text{field\_score}(\hat{p}_i), & k \neq 0 \\[6pt]
+    0, & k = 0
+  \end{cases}
+\end{equation}
+其中 $k$ 为模型预测的条目总数，字段完整度得分定义为：
+\begin{equation}
+  \text{field\_score}(\hat{p}_i) = \frac{ 1[\texttt{step\_id}] + 1[\texttt{agent}] + 1[\texttt{fault\_code}]}{3}
+\end{equation}
+$1[\cdot]$ 表示对应字段存在且非空。三个子项的最大贡献分别为 0.2、0.3、0.5，具体取值见实验设置（表~\ref{tab:reward_weights}）。
+ 
+逻辑奖励$R_{\text{logic}}$在格式满分的条件下激活，由四个 F1 奖励项与一个去重惩罚项构成：
+\begin{equation}
+  R_{\text{logic}} = F1_{\text{step}} + F1_{\text{step\_type}} + F1_{\text{step\_agent}} + F1_{\text{triple}} - R_{\text{dup}}
+\end{equation}
+
+四个 F1 项的匹配对象如表~\ref{tab:reward}~所示。
+
+\begin{table}[htbp]
+  \centering
+  \caption{逻辑奖励各分量说明}
+  \label{tab:reward}
+  \renewcommand{\arraystretch}{1.35}
+  \small
+  \begin{tabular}{p{2.4cm} p{5.6cm} p{6.6cm}}
+    \hline
+    \textbf{奖励项} & \textbf{匹配对象} & \textbf{作用} \\
+    \hline
+    $F1_{\text{step}}$       & $\{\texttt{step\_id}\}$ & 判断异常步骤是否定位正确 \\
+    $F1_{\text{step\_type}}$ & $\{(\texttt{step\_id}, \texttt{fault\_code})\}$  & 判断步骤上的故障类型是否正确 \\
+    $F1_{\text{step\_agent}}$& $\{(\texttt{step\_id}, \texttt{agent})\}$ & 判断步骤上的责任智能体是否正确 \\
+    $F1_{\text{triple}}$     & $\{(\texttt{step\_id}, \texttt{agent}, \texttt{fault\_code})\}$ & 判断完整归因三元组是否正确 \\
+    $R_{\text{dup}}$         & 预测项总数 $k$，唯一步骤数 $u$ & 对重复输出同一步骤的行为施加惩罚 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+各项均采用统一的 Precision--Recall--F1 计算框架，核心思路为召回率约束漏报，准确率约束误报：
+\begin{equation}
+  F_1 = \frac{2PR}{P+R}, \quad
+  P = \frac{|\hat{S} \cap S^*|}{|\hat{S}|}, \quad
+  R = \frac{|\hat{S} \cap S^*|}{|S^*|}
+\end{equation}
+其中 $S^*$ 为真实标注集合，$\hat{S}$ 为模型预测集合。设真实标注集为 $G = \{g_1,\ldots,g_m\}$，预测集为 $P = \{p_1,\ldots,p_n\}$。
+
+ 
+为防止模型通过对同一步骤输出多个不同 \texttt{agent}/\texttt{fault\_code} 来覆盖猜测，在计算每个 F1 项之前，均先对预测集合按对应匹配键去重：$F1_{\text{step}}$ 按 \texttt{step\_id} 去重，$F1_{\text{step\_type}}$ 按 $(\texttt{step\_id}, \texttt{fault\_code})$ 去重，$F1_{\text{step\_agent}}$ 按 $(\texttt{step\_id}, \texttt{agent})$ 去重，$F1_{\text{triple}}$ 按三元组去重。去重保证了每个真实根因最多被一个预测项匹配，每个预测项也最多匹配一个真实根因。
+ 
+去重后若预测集中仍存在重复步骤，按归一化重复率施加惩罚 $R_{\text{dup}}$：
+\begin{equation}
+  R_{\text{dup}} = \begin{cases}
+    \dfrac{k - u}{k}, & k \neq 0 \\[4pt]
+    0, & k = 0
+  \end{cases}
+\end{equation}
+其中 $k$ 为预测项总数，$u$ 为其中唯一步骤编号的数量。当无重复时 $k=u$，惩罚为零。
+ 
+综上，奖励函数将归因任务的优化目标扩展为“格式合法 $\to$ 步骤定位 $\to$ 智能体识别 $\to$ 故障分类 $\to$ 完整三元组"的层次化联合约束，四个 F1 项分别从不同粒度衡量归因质量，有效兼顾了单点与多点故障场景。
+ 
+\subsection{组采样与策略优化子模块}
+组采样与策略优化子模块采用 GRPO（Group Relative Policy Optimization）\cite{DBLP:journals/corr/abs-2402-03300}算法，通过"多路径探索—组内比较—策略更新"的方式持续提升模型在复杂归因空间中的推理质量。
+ 
+首先进行组采样，对于同一输入上下文 $\mathcal{X}$，当前策略模型 $\pi_\theta$ 并行采样生成 $G$ 条不同的推理路径与诊断结果 $ \{\hat{\mathcal{Y}}_1, \hat{\mathcal{Y}}_2, \ldots, \hat{\mathcal{Y}}_G\}$：
+\begin{equation}
+  \{\hat{\mathcal{Y}}_1, \hat{\mathcal{Y}}_2, \ldots, \hat{\mathcal{Y}}_G\} \sim \pi_\theta(\cdot \mid \mathcal{X})
+\end{equation}
+多路径并行探索有效扩大候选推理空间，可避免模型陷入单一路径或局部最优。
+  
+随后进行组内奖励归一化，对组内每条输出计算奖励 $r_i = r(\hat{\mathcal{Y}}_i, \mathcal{Y}^*)$，再进行组内归一化得到相对优势 $A_i$：
+\begin{equation}
+  A_i = \frac{r_i - \mu_G}{\sigma_G + \epsilon}, \quad
+  \mu_G = \frac{1}{G}\sum_{j=1}^G r_j, \quad
+  \sigma_G = \sqrt{\frac{1}{G}\sum_{j=1}^G (r_j - \mu_G)^2}
+\end{equation}
+其中 $\epsilon > 0$ 为数值稳定常数。相对优势 $A_i > 0$ 表明该路径优于组内均值，反之则低于均值。
+ 
+最后基于 GRPO 目标函数 $\mathcal{L}_{\text{GRPO}}(\theta)$进行策略更新，同时引入 KL 散度约束以保证训练稳定性：
+\begin{equation}
+  \mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}\!\left[\frac{1}{G}\sum_{i=1}^G \min\!\left(
+    \frac{\pi_\theta(\hat{\mathcal{Y}}_i \mid \mathcal{X})}{\pi_{\theta_{\text{old}}}(\hat{\mathcal{Y}}_i \mid \mathcal{X})} A_i,\;
+    \text{clip}\!\left(\frac{\pi_\theta}{\pi_{\theta_{\text{old}}}}, 1\!-\!\epsilon, 1\!+\!\epsilon\right) A_i
+  \right)\right] + \beta\, D_{\text{KL}}(\pi_\theta \| \pi_0)
+  \label{eq:grpo}
+\end{equation}
+其中 $\epsilon$ 为 clip 超参数，$\beta$ 为 KL 约束系数，$\pi_0$ 为 SFT 后的参考模型。通过应用该目标函数，方法实现了高奖励路径概率的提升与低质量路径的抑制。
+
+\subsection{模型输出子模块}
+模型输出子模块的目标是将训练完成的归因专家模型 $\pi^*$ 的推理结果以统一、规范的结构化形式呈现，使归因结论不仅"可读"，更"可解析、可复用、可驱动下游操作"。这一设计理念贯穿输出格式的每一个字段：每个字段都有明确的语义边界，每一条归因记录都可以独立地驱动一种具体的系统修复动作。
+ 
+给定输入上下文 $\mathcal{X} = [T, \mathcal{G}, \mathcal{C}, \mathcal{P}_{\text{prior}}]$，$\pi^*$ 输出一份严格 JSON 格式的归因报告，包含三个顶层字段，其完整结构与各字段的语义、作用如表~\ref{tab:output_fields}~所示。
+ 
+\begin{table}[htbp]
+  \centering
+  \caption{归因专家模型输出字段说明}
+  \label{tab:output_fields}
+  \renewcommand{\arraystretch}{1.3}
+  \small
+  \begin{tabular}{lll}
+    \hline
+    \textbf{字段路径} & \textbf{类型} & \textbf{语义} \\
+    \hline
+    \texttt{root\_causes}          & 列表     & 多点根因记录列表，每项对应一个独立故障点 \\
+    \quad\texttt{.step\_id}        & 整数     & 根因步骤编号，对应 \texttt{history} 中的 \texttt{step} \\
+    \quad\texttt{.agent}           & 字符串   & 责任智能体名称，对应 \texttt{history} 中的 \texttt{name} \\
+    \quad\texttt{.fault\_code}     & 字符串   & 故障类型码，取自候选池（如 \texttt{f1\_3\_...}） \\
+    \quad\texttt{.evidence}        & 字符串   & 轨迹中支持归因结论的直接文本证据 \\
+    \quad\texttt{.reason}          & 字符串   & 该步骤导致下游失败的因果推理说明 \\
+    \quad\texttt{.related\_error}  & 列表   & 和该错误相关的步骤集合 \\
+    \texttt{attribution\_subgraph} & 对象     & 归因传播子图 \\
+    \quad\texttt{.nodes}           & 整数列表 & 参与异常传播的步骤编号集合 \\
+    \quad\texttt{.edges}           & 对象     & 步骤间有向因果边，描述错误传播路径 \\
+    \texttt{summary}               & 字符串   & 全局归因摘要（自然语言） \\
+    \hline
+  \end{tabular}
+\end{table}
+ 
+在多点故障场景下，\texttt{root\_causes} 列表包含多条记录，每条记录对应一个独立的根因步骤，各记录之间的因果传播关系通过 \texttt{attribution\_subgraph} 中的有向边加以描述。这种"扁平化列表 + 结构化子图"的双层表示既保证了每个根因点的独立可读性，又通过子图捕捉了多点故障之间的级联关系，避免了将复杂多点归因压缩为单一结论所带来的信息损失。
+ 
+从工程应用的角度看，输出报告的可解析性使归因结果能够以程序化方式驱动下游操作：\texttt{step\_id} 可直接定位需要修改的历史步骤，\texttt{agent} 可用于筛选出需要被替换或优化提示词的目标智能体，\texttt{fault\_code} 可用于统计故障模式分布并触发对应的修复策略，而 \texttt{evidence} 与 \texttt{reason} 则为人工审查提供了完整的因果解释链，使归因结果真正落地为"可解释、可追溯、可驱动修复"的工程产物，而非仅停留于评估指标上的数字表现。
+
+
+\section{本章小结}
+
+本章围绕多智能体系统多点异常归因问题，提出了从数据构建到模型训练的完整方法体系，主要工作可归纳为以下三个层面。
+ 
+在数据构建层面，本章提出 MALTA 异常数据收集与标注工作流，设计了"基础数据采集—候选池约束—双轨异常构造—对抗式筛选—标签生成"的完整流水线，并以适配器—中间件—编排三层工程架构将其落地为可扩展的工业级数据生产系统。其中，多点异常错误候选池将 16 种故障类型组织为单智能体层（F1）、工作流协作层（F2）、平台环境层（F3）三个层次，为后续异常构造提供统一的先验词表。双轨设计分别处理正常轨迹（通过异常注入构造可控样本）与真实异常轨迹（通过反事实回放提炼因果线索），对抗式样本筛选机制则持续淘汰对现有模型过于简单的样本，保留真正具有挑战性的高价值难例，从数据层面保证了训练集的质量与多样性。
+ 
+在模型训练层面，本章使用"监督微调热启动—强化学习对齐优化"的渐进式训练范式，监督微调阶段将运行轨迹、交互拓扑与故障类型先验联合编码为统一输入，通过端到端监督训练完成从通用基座到领域专家的能力迁移，为后续强化学习提供稳定的策略初始化；强化学习阶段采用 GRPO 算法，以格式解析、步骤定位、智能体识别、故障分类与去重惩罚构成的多粒度联合奖励驱动策略对齐，将优化目标从单一结果正确性扩展为"格式合法 + 步骤定位 + 智能体识别 + 故障分类"的层次化联合约束，并通过 KL 散度约束保证训练稳定性。
+ 
+在模型输出层面，训练后的归因专家模型以结构化 JSON 格式输出根因步骤、责任智能体、故障类型码与归因传播子图，兼顾了结果的可解析性与归因过程的可解释性，为后续系统优化提供直接可用的工程反馈。
+ 
+两章合计构成本文的核心方法贡献：MALTA 解决了"没有数据"的问题，渐进式训练范式解决了"模型不会做"的问题，二者相互依存，共同支撑了后续实验中归因性能的显著提升。

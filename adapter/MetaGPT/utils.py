@@ -5,7 +5,8 @@ NAME_PROFILE_MAP = {
     'Alex': 'Engineer',
     'David': 'DataAnalyst',
     'Bob': 'Architect',
-    'Alice': 'Product Manager'
+    'Alice': 'Product Manager',
+    'metagpt.roles.searcher.Searcher':'Searcher',
 }
 
 PROFILE_NAME_MAP = {
@@ -13,7 +14,8 @@ PROFILE_NAME_MAP = {
     'Engineer': 'Alex',
     'DataAnalyst': 'David',
     'Architect': 'Bob',
-    'Product Manager': 'Alice'
+    'Product Manager': 'Alice',
+    'metagpt.roles.searcher.Searcher':'Sam',
 }
 
 def get_profile(name: str):
